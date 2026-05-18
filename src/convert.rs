@@ -110,6 +110,16 @@ impl FromStr for PackageManager {
     }
 }
 
+/// Shell snippet that removes an existing passwd/group entry — matched by id
+/// and by name — so a colliding default account can be recreated. Failures are
+/// swallowed: the entry may simply not exist.
+fn drop_conflicting(tool: &str, db: &str, id: u32, name: &str) -> String {
+    format!(
+        "{tool} \"$(getent {db} {id} | cut -d: -f1)\" 2>/dev/null || true; \
+         {tool} {name} 2>/dev/null || true"
+    )
+}
+
 impl TryFrom<&Mixin> for Dockerfile {
     type Error = ConversionError;
 
@@ -207,10 +217,17 @@ impl TryFrom<&Mixin> for Dockerfile {
         }
 
         dockerfile.add(Command::COMMENT("Configure user".into()));
-        dockerfile.add(Command::RUN(format!("groupadd --gid {} {}", gid, gname)));
+        // Drop any account the base image ships at our uid/gid (e.g. Ubuntu's
+        // 'ubuntu' at 1000) before recreating ours. Delete the user before the
+        // group, since groupdel refuses to remove a user's primary group.
+        let uname = uname.to_string();
+        let gname = gname.to_string();
         dockerfile.add(Command::RUN(format!(
-            "useradd --gid {} --uid {} --home /home/{} {}",
-            gid, uid, uname, uname
+            "{}; {}; \
+             groupadd --gid {gid} {gname} && \
+             useradd --gid {gid} --uid {uid} --home /home/{uname} {uname}",
+            drop_conflicting("userdel -r", "passwd", uid, &uname),
+            drop_conflicting("groupdel", "group", gid, &gname),
         )));
         dockerfile.add(Command::RUN(format!("mkdir -p /home/{}", uname)));
         dockerfile.add(Command::RUN(format!(
